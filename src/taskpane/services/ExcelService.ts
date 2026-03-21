@@ -4,6 +4,10 @@
  * dan Queueing System yang mencegah "Conflict/Race Condition" saat eksekusi beruntun.
  */
 
+interface ExecutionResult {
+    warnings: string[];
+}
+
 export class ExcelService {
     private static instance: ExcelService;
     
@@ -11,7 +15,7 @@ export class ExcelService {
     private __lastSnapshot: { address: string; values: any[][]; formulas: any[][], sheetName: string } | null = null;
     
     // Sistem Antrean (Queue)
-    private actionQueue: Array<() => Promise<void>> = [];
+    private actionQueue: Array<() => Promise<ExecutionResult>> = [];
     private isExecutingQueue = false;
 
     private constructor() {}
@@ -64,15 +68,17 @@ export class ExcelService {
     /**
      * Mengeksekusi aksi Excel ke dalam Queue (Antrean)
      */
-    public async executeAction(functionName: string, args: any, details?: any): Promise<void> {
+    public async executeAction(functionName: string, args: any, details?: any): Promise<ExecutionResult> {
         return new Promise((resolve, reject) => {
             // Tambahkan tugas ke antrean
             this.actionQueue.push(async () => {
                 try {
-                    await this._executeActionCore(functionName, args, details);
-                    resolve();
+                    const result = await this._executeActionCore(functionName, args, details);
+                    resolve(result);
+                    return result;
                 } catch (error) {
                     reject(error);
+                    throw error;
                 }
             });
 
@@ -228,8 +234,9 @@ export class ExcelService {
     /**
      * Eksekusi spesifik inti dari Office.js (dibungkus untuk dipakai oleh queue)
      */
-    private async _executeActionCore(functionName: string, args: any, details?: any): Promise<void> {
-      await Excel.run(async (context) => {
+    private async _executeActionCore(functionName: string, args: any, details?: any): Promise<ExecutionResult> {
+            const result = await Excel.run(async (context) => {
+        const warnings: string[] = [];
         // Ambil snapshot untuk fitur Undo (1 langkah ke belakang) dari sel target utama pertama (fallback safety)
                 const snapshotAddress =
                     args.address ||
@@ -359,6 +366,27 @@ export class ExcelService {
                                         const minValue = typeof args.minValue === "number" && Number.isFinite(args.minValue)
                                             ? Math.max(args.minValue, 0)
                                             : undefined;
+
+                                        if (typeof args.topN === "number" && Number.isFinite(args.topN) && topN !== args.topN) {
+                                            warnings.push(`topN dinormalisasi dari ${args.topN} menjadi ${topN}.`);
+                                        }
+                                        if (typeof args.minValue === "number" && Number.isFinite(args.minValue) && minValue !== args.minValue) {
+                                            warnings.push(`minValue dinormalisasi dari ${args.minValue} menjadi ${minValue}.`);
+                                        }
+
+                                        const sourceHeader = Array.isArray(sourceRange.values) && sourceRange.values.length > 0
+                                            ? sourceRange.values[0]
+                                            : [];
+                                        if (Array.isArray(sourceHeader) && sourceHeader.length > 0) {
+                                            const safeGroup = Math.max(0, Math.min(groupByColumn, sourceHeader.length - 1));
+                                            const safeValue = Math.max(0, Math.min(valueColumn, sourceHeader.length - 1));
+                                            if (safeGroup !== groupByColumn) {
+                                                warnings.push(`groupByColumn dinormalisasi dari ${groupByColumn} menjadi ${safeGroup}.`);
+                                            }
+                                            if (safeValue !== valueColumn) {
+                                                warnings.push(`valueColumn dinormalisasi dari ${valueColumn} menjadi ${safeValue}.`);
+                                            }
+                                        }
                                         const outputSheetName = typeof args.outputSheetName === "string" && args.outputSheetName.trim()
                                             ? args.outputSheetName.trim()
                                             : "PivotSummary";
@@ -406,6 +434,9 @@ export class ExcelService {
                                             summaryChart.title.text = typeof args.chartTitle === "string" && args.chartTitle.trim()
                                                 ? args.chartTitle.trim()
                                                 : "Pivot Summary Chart";
+                                        }
+                                        if (args.createChart && summaryRows.length <= 1) {
+                                            warnings.push("Chart tidak dibuat karena hasil ringkasan tidak memiliki baris data yang cukup.");
                                         }
                                         break;
                                     }
@@ -457,7 +488,11 @@ export class ExcelService {
   
         // Eksekusi antrean Office.js
         await context.sync();
+
+            return { warnings };
       });
+
+              return result;
     }
   
     /**

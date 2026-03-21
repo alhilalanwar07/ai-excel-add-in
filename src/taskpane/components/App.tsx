@@ -15,6 +15,13 @@ import { getWorkbookSchema, sendAICommand, invalidateWorkbookSchemaCache } from 
 import { excelService } from "../services/ExcelService";
 import type { AIMasterPayload, ActionType } from "../utils/gemini";
 import { PROMPT_TEMPLATES } from "../constants/promptTemplates";
+import {
+  classifyError,
+  createTelemetryRequestId,
+  emitTelemetryEvent,
+  startTelemetryForwarder,
+} from "../utils/telemetry";
+import { validateAndNormalizeAction } from "../utils/actionValidator";
 
 type TemplateLevel = "Basic" | "Advanced" | "Automation";
 
@@ -35,6 +42,14 @@ interface Message {
   isPendingAwaitingConfirmation?: boolean;
   pendingActionData?: PendingActionData;
   imageBase64?: string;
+  recommendedPrompt?: string;
+  recommendedParams?: Array<{ field: string; value: string }>;
+}
+
+interface RecoverySuggestion {
+  userMessage: string;
+  recommendedPrompt: string;
+  recommendedParams: Array<{ field: string; value: string }>;
 }
 
 type ModelId =
@@ -158,6 +173,149 @@ function formatMs(value: number): string {
   return `${Math.round(value)}ms`;
 }
 
+function summarizeIntent(promptText: string): string {
+  const normalized = promptText.replace(/\s+/g, " ").trim();
+  return normalized.length > 80 ? `${normalized.slice(0, 77)}...` : normalized;
+}
+
+function getSchemaStats(contextData: string): { sheetCount: number; sampleRangeCount: number } {
+  try {
+    const parsed = JSON.parse(contextData) as {
+      sheets?: unknown[];
+      activeSheetInfo?: { selectionSample?: unknown[][] } | null;
+    };
+    const sheetCount = Array.isArray(parsed.sheets) ? parsed.sheets.length : 0;
+    const sampleRangeCount = Array.isArray(parsed.activeSheetInfo?.selectionSample)
+      ? parsed.activeSheetInfo!.selectionSample.length
+      : 0;
+    return { sheetCount, sampleRangeCount };
+  } catch {
+    return { sheetCount: 0, sampleRangeCount: 0 };
+  }
+}
+
+function buildNormalizationMessage(warnings: string[]): string {
+  const normalizedLines = warnings.map((warning) => {
+    const match = warning.match(/^(\w+) dinormalisasi dari (.+) menjadi (.+)\.$/i);
+    if (!match) return `- ${warning}`;
+
+    const field = match[1];
+    const fromValue = match[2];
+    const toValue = match[3];
+    return `- ${field}: ${fromValue} -> ${toValue} (gunakan ${toValue} untuk hasil konsisten)`;
+  });
+
+  return `⚙️ Penyesuaian otomatis diterapkan:\n${normalizedLines.join("\n")}`;
+}
+
+function buildRecommendedPromptFromWarnings(warnings: string[]): string | null {
+  const recommendedPairs: string[] = [];
+
+  warnings.forEach((warning) => {
+    const match = warning.match(/^(\w+) dinormalisasi dari (.+) menjadi (.+)\.$/i);
+    if (!match) return;
+
+    const field = match[1];
+    const toValue = match[3];
+    recommendedPairs.push(`${field} ${toValue}`);
+  });
+
+  if (recommendedPairs.length === 0) return null;
+  return `Gunakan parameter rekomendasi berikut pada perintah berikutnya: ${recommendedPairs.join(", ")}.`;
+}
+
+function extractRecommendedParams(warnings: string[]): Array<{ field: string; value: string }> {
+  const params: Array<{ field: string; value: string }> = [];
+
+  warnings.forEach((warning) => {
+    const match = warning.match(/^(\w+) dinormalisasi dari (.+) menjadi (.+)\.$/i);
+    if (!match) return;
+    params.push({ field: match[1], value: match[3] });
+  });
+
+  return params;
+}
+
+function applyRecommendationsToPrompt(
+  basePrompt: string,
+  params: Array<{ field: string; value: string }>
+): string {
+  if (!basePrompt.trim()) {
+    return params.map((p) => `${p.field} ${p.value}`).join(", ");
+  }
+
+  let updated = basePrompt;
+  for (const param of params) {
+    const escapedField = param.field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const existingPattern = new RegExp(`\\b${escapedField}\\s+([^,.;\\n]+)`, "i");
+    if (existingPattern.test(updated)) {
+      updated = updated.replace(existingPattern, `${param.field} ${param.value}`);
+    } else {
+      updated = `${updated.replace(/\s+$/, "")}, ${param.field} ${param.value}`;
+    }
+  }
+
+  return updated;
+}
+
+function buildRecoverySuggestion(errorClass: ReturnType<typeof classifyError>, errorMessage: string): RecoverySuggestion {
+  const base = {
+    userMessage: `Saran pemulihan: ${errorMessage}`,
+    recommendedPrompt: "",
+    recommendedParams: [] as Array<{ field: string; value: string }>,
+  };
+
+  if (errorClass === "validation") {
+    return {
+      userMessage: "Input belum valid. Sistem menyiapkan parameter aman agar bisa dieksekusi.",
+      recommendedPrompt: "Gunakan parameter valid untuk aksi yang sama dengan target range aktif dan batas aman.",
+      recommendedParams: [
+        { field: "topN", value: "10" },
+        { field: "minValue", value: "0" },
+        { field: "sortDirection", value: "desc" },
+      ],
+    };
+  }
+
+  if (errorClass === "network") {
+    return {
+      userMessage: "Koneksi timeout. Coba request lebih ringkas atau retry dengan timeout lebih longgar.",
+      recommendedPrompt: "Jalankan ulang dengan payload ringkas dan retry policy network.",
+      recommendedParams: [
+        { field: "timeoutMs", value: "45000" },
+        { field: "maxRetries", value: "2" },
+      ],
+    };
+  }
+
+  if (errorClass === "model") {
+    return {
+      userMessage: "Model utama gagal. Disarankan fallback ke model cepat untuk melanjutkan flow.",
+      recommendedPrompt: "Gunakan model fallback dan format respons action yang lebih ketat.",
+      recommendedParams: [
+        { field: "model", value: "gemini-2.5-flash" },
+      ],
+    };
+  }
+
+  if (errorClass === "execution") {
+    return {
+      userMessage: "Eksekusi Excel gagal. Coba targetkan range aktif terlebih dahulu.",
+      recommendedPrompt: "Validasi sheet aktif dan jalankan ulang aksi pada range yang lebih sempit.",
+      recommendedParams: [
+        { field: "target_scope", value: "active_sheet" },
+      ],
+    };
+  }
+
+  return {
+    ...base,
+    userMessage: "Terjadi error tak terklasifikasi. Coba ulang dengan instruksi lebih spesifik.",
+    recommendedPrompt: "Ulangi perintah dengan parameter eksplisit dan target range/sheet yang jelas.",
+    recommendedParams: [],
+  };
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 const App: React.FC = () => {
@@ -174,6 +332,7 @@ const App: React.FC = () => {
   const [isLoading,  setIsLoading]  = useState(false);
   const [selectedTemplateLevel, setSelectedTemplateLevel] = useState<TemplateLevel>("Basic");
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>(PROMPT_TEMPLATES[0]?.id ?? "");
+  const lastUserPromptRef = useRef<string>("");
 
   // ── FIX #1: Ref yang selalu sinkron dengan state messages terbaru.
   // Semua callback membaca ini — bukan `messages` langsung — agar tidak stale.
@@ -194,6 +353,10 @@ const App: React.FC = () => {
     setApiKey(saved);
     setIsKeySaved(saved.length > 0);
   }, [selectedModel]);
+
+  useEffect(() => {
+    startTelemetryForwarder();
+  }, []);
 
   useEffect(() => {
     const eventType = Office.EventType.DocumentSelectionChanged;
@@ -237,12 +400,39 @@ const App: React.FC = () => {
       if (retryCount === 0) setIsLoading(true);
 
       try {
-        await excelService.executeAction(
+        const actionStartedAt = performance.now();
+        const executionResult = await excelService.executeAction(
           actionData.name,
           actionData.args,
           actionData.details
         );
         invalidateWorkbookSchemaCache();
+
+        emitTelemetryEvent({
+          eventName: "action_done",
+          request_id: msgId,
+          stage: "action_execute",
+          source: "taskpane",
+          outcome: "success",
+          latency_ms: performance.now() - actionStartedAt,
+          action_type: actionData.name,
+          action_count: 1,
+          action_latency_ms: performance.now() - actionStartedAt,
+        });
+
+        if (executionResult.warnings.length > 0) {
+          const recommendedPrompt = buildRecommendedPromptFromWarnings(executionResult.warnings);
+          const recommendedParams = extractRecommendedParams(executionResult.warnings);
+          appendMsg(
+            mkMsg({
+              role: "system",
+              text: buildNormalizationMessage(executionResult.warnings),
+              actionOutput: `[Normalization warnings: ${executionResult.warnings.length}]`,
+              recommendedPrompt: recommendedPrompt ?? undefined,
+              recommendedParams: recommendedParams.length > 0 ? recommendedParams : undefined,
+            })
+          );
+        }
 
         const successMsg = mkMsg({
           role: "system",
@@ -264,6 +454,21 @@ const App: React.FC = () => {
             contextData: ctxData,
             chatHistory: historyAfterSuccess, // FIX #1: bukan `messages` (stale)
             model: selectedModel,
+            requestId: msgId,
+            onRetryAttempt: ({ attempt, maxRetries, reason }) => {
+              emitTelemetryEvent({
+                eventName: "retry_attempt",
+                request_id: msgId,
+                stage: "ai_call",
+                source: "taskpane",
+                outcome: "retry",
+                latency_ms: 0,
+                model_used: selectedModel,
+                retry_attempt_number: attempt,
+                max_retry_allowed: maxRetries,
+                retry_reason: reason,
+              });
+            },
           });
 
           await processAIResponse(loopResp, historyAfterSuccess);
@@ -292,6 +497,21 @@ const App: React.FC = () => {
               chatHistory: messagesRef.current, // FIX #1: baca ref, bukan closure
               model: selectedModel,
               errorFeedback: errMsg,
+              requestId: msgId,
+              onRetryAttempt: ({ attempt, maxRetries, reason }) => {
+                emitTelemetryEvent({
+                  eventName: "retry_attempt",
+                  request_id: msgId,
+                  stage: "ai_call",
+                  source: "taskpane",
+                  outcome: "retry",
+                  latency_ms: 0,
+                  model_used: selectedModel,
+                  retry_attempt_number: attempt,
+                  max_retry_allowed: maxRetries,
+                  retry_reason: reason,
+                });
+              },
             });
 
             if (fixResp.functionCall) {
@@ -300,7 +520,48 @@ const App: React.FC = () => {
                 args: fixResp.functionCall.args,
                 details: fixResp.functionCall.parsedDetails,
               };
-              await executeAction(msgId, fixedAction, retryCount + 1, messagesRef.current);
+              const validatedFix = validateAndNormalizeAction(fixedAction);
+              if (!validatedFix.isValid) {
+                const validationError = validatedFix.errors.join(" ");
+                const recovery = buildRecoverySuggestion("validation", validationError);
+                emitTelemetryEvent({
+                  eventName: "failure",
+                  request_id: msgId,
+                  stage: "action_execute",
+                  source: "taskpane",
+                  outcome: "failure",
+                  latency_ms: 0,
+                  action_type: fixedAction.name,
+                  error_class: "validation",
+                  error_message: validationError,
+                  is_recoverable: false,
+                });
+                appendMsg(
+                  mkMsg({
+                    role: "ai",
+                    text: `❌ Payload aksi tidak valid: ${validationError}\n\n${recovery.userMessage}`,
+                    recommendedPrompt: recovery.recommendedPrompt,
+                    recommendedParams: recovery.recommendedParams,
+                  })
+                );
+                return;
+              }
+
+              if (validatedFix.warnings.length > 0) {
+                const recommendedPrompt = buildRecommendedPromptFromWarnings(validatedFix.warnings);
+                const recommendedParams = extractRecommendedParams(validatedFix.warnings);
+                appendMsg(
+                  mkMsg({
+                    role: "system",
+                    text: buildNormalizationMessage(validatedFix.warnings),
+                    actionOutput: `[Validator warnings: ${validatedFix.warnings.length}]`,
+                    recommendedPrompt: recommendedPrompt ?? undefined,
+                    recommendedParams: recommendedParams.length > 0 ? recommendedParams : undefined,
+                  })
+                );
+              }
+
+              await executeAction(msgId, validatedFix.normalizedAction, retryCount + 1, messagesRef.current);
             } else {
               appendMsg(mkMsg({ role: "ai", text: "❌ AI tidak menemukan solusi perbaikan." }));
             }
@@ -309,6 +570,19 @@ const App: React.FC = () => {
             appendMsg(mkMsg({ role: "ai", text: `❌ Gagal menghubungi API saat perbaikan: ${fixMsg}` }));
           }
         } else {
+          emitTelemetryEvent({
+            eventName: "failure",
+            request_id: msgId,
+            stage: "action_execute",
+            source: "taskpane",
+            outcome: "failure",
+            latency_ms: 0,
+            action_type: actionData.name,
+            error_class: classifyError(errMsg),
+            error_message: errMsg,
+            is_recoverable: false,
+          });
+
           appendMsg(
             mkMsg({
               role: "ai",
@@ -334,25 +608,77 @@ const App: React.FC = () => {
       _currentHistory: Message[]
     ): Promise<void> => {
       if (!response.functionCall) {
+        emitTelemetryEvent({
+          eventName: "action_done",
+          request_id: _currentHistory[_currentHistory.length - 1]?.id ?? mkId(),
+          stage: "action_execute",
+          source: "taskpane",
+          outcome: "success",
+          latency_ms: 0,
+          action_type: "analysis",
+          action_count: 1,
+        });
         appendMsg(mkMsg({ role: "ai", text: response.textResponse }));
         return;
       }
 
       const { name, args, parsedDetails: details } = response.functionCall;
       const actionData: PendingActionData = { name, args, details };
+      const validatedAction = validateAndNormalizeAction(actionData);
+      if (!validatedAction.isValid) {
+        const validationError = validatedAction.errors.join(" ");
+        const recovery = buildRecoverySuggestion("validation", validationError);
+        emitTelemetryEvent({
+          eventName: "failure",
+          request_id: _currentHistory[_currentHistory.length - 1]?.id ?? mkId(),
+          stage: "action_execute",
+          source: "taskpane",
+          outcome: "failure",
+          latency_ms: 0,
+          action_type: actionData.name,
+          error_class: "validation",
+          error_message: validationError,
+          is_recoverable: false,
+        });
+        appendMsg(
+          mkMsg({
+            role: "ai",
+            text: `❌ Payload aksi tidak valid: ${validationError}\n\n${recovery.userMessage}`,
+            recommendedPrompt: recovery.recommendedPrompt,
+            recommendedParams: recovery.recommendedParams,
+          })
+        );
+        return;
+      }
+
+      if (validatedAction.warnings.length > 0) {
+        const recommendedPrompt = buildRecommendedPromptFromWarnings(validatedAction.warnings);
+        const recommendedParams = extractRecommendedParams(validatedAction.warnings);
+        appendMsg(
+          mkMsg({
+            role: "system",
+            text: buildNormalizationMessage(validatedAction.warnings),
+            actionOutput: `[Validator warnings: ${validatedAction.warnings.length}]`,
+            recommendedPrompt: recommendedPrompt ?? undefined,
+            recommendedParams: recommendedParams.length > 0 ? recommendedParams : undefined,
+          })
+        );
+      }
+
+      const safeActionData = validatedAction.normalizedAction;
       const previewText =
-        details.preview_description ||
+        safeActionData.details.preview_description ||
         response.textResponse ||
         `Akan menjalankan: **${name}**`;
 
-      if (details.requires_confirmation) {
+      if (safeActionData.details.requires_confirmation) {
         // Tunggu konfirmasi user — tambah pesan pending lalu berhenti
         appendMsg(
           mkMsg({
             role: "ai",
             text: previewText,
             isPendingAwaitingConfirmation: true,
-            pendingActionData: actionData,
+            pendingActionData: safeActionData,
           })
         );
       } else {
@@ -361,10 +687,10 @@ const App: React.FC = () => {
           role: "ai",
           text: previewText,
           isPendingAwaitingConfirmation: false,
-          pendingActionData: actionData,
+          pendingActionData: safeActionData,
         });
         const historyWithAuto = appendMsg(autoMsg);
-        await executeAction(autoMsg.id, actionData, 0, historyWithAuto);
+        await executeAction(autoMsg.id, safeActionData, 0, historyWithAuto);
       }
     },
     [appendMsg, executeAction]
@@ -377,6 +703,8 @@ const App: React.FC = () => {
 
     const text = prompt.trim();
     const imagePayload = attachedImage;
+    const requestId = createTelemetryRequestId();
+    lastUserPromptRef.current = text;
     
     setPrompt("");
     setAttachedImage(null);
@@ -384,12 +712,38 @@ const App: React.FC = () => {
     const userMsg = mkMsg({ role: "user", text, imageBase64: imagePayload || undefined });
     const historyWithUser = appendMsg(userMsg);
 
+    emitTelemetryEvent({
+      eventName: "request_start",
+      request_id: requestId,
+      stage: "request_start",
+      source: "taskpane",
+      outcome: "success",
+      latency_ms: 0,
+      input_type: imagePayload ? (text ? "text+image" : "image") : "text",
+      user_intent_summary: summarizeIntent(text || "image request"),
+      model_used: selectedModel,
+    });
+
     setIsLoading(true);
     try {
       const totalStartedAt = performance.now();
       const schemaStartedAt = performance.now();
       const ctxData = await getWorkbookSchema();
       const schemaDuration = performance.now() - schemaStartedAt;
+      const schemaStats = getSchemaStats(ctxData);
+
+      emitTelemetryEvent({
+        eventName: "schema_done",
+        request_id: requestId,
+        stage: "schema",
+        source: "taskpane",
+        outcome: "success",
+        latency_ms: schemaDuration,
+        model_used: selectedModel,
+        schema_latency_ms: schemaDuration,
+        sheet_count: schemaStats.sheetCount,
+        sample_range_count: schemaStats.sampleRangeCount,
+      });
 
       const aiStartedAt = performance.now();
       const response = await sendAICommand({
@@ -398,10 +752,36 @@ const App: React.FC = () => {
         contextData: ctxData,
         chatHistory: historyWithUser, // FIX #1: snapshot terbaru
         model: selectedModel,
-        imageBase64: imagePayload || undefined
+        requestId,
+        imageBase64: imagePayload || undefined,
+        onRetryAttempt: ({ attempt, maxRetries, reason }) => {
+          emitTelemetryEvent({
+            eventName: "retry_attempt",
+            request_id: requestId,
+            stage: "ai_call",
+            source: "taskpane",
+            outcome: "retry",
+            latency_ms: 0,
+            model_used: selectedModel,
+            retry_attempt_number: attempt,
+            max_retry_allowed: maxRetries,
+            retry_reason: reason,
+          });
+        },
       });
       const aiDuration = performance.now() - aiStartedAt;
       const totalDuration = performance.now() - totalStartedAt;
+
+      emitTelemetryEvent({
+        eventName: "ai_done",
+        request_id: requestId,
+        stage: "ai_call",
+        source: "taskpane",
+        outcome: "success",
+        latency_ms: aiDuration,
+        model_used: response.meta?.modelUsed ?? selectedModel,
+        ai_latency_ms: aiDuration,
+      });
 
       await processAIResponse(response, historyWithUser);
 
@@ -414,7 +794,27 @@ const App: React.FC = () => {
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      appendMsg(mkMsg({ role: "ai", text: `❌ Error: ${msg}` }));
+      const errorClass = classifyError(msg);
+      const recovery = buildRecoverySuggestion(errorClass, msg);
+      emitTelemetryEvent({
+        eventName: "failure",
+        request_id: requestId,
+        stage: "ai_call",
+        source: "taskpane",
+        outcome: "failure",
+        latency_ms: 0,
+        model_used: selectedModel,
+        error_class: errorClass,
+        error_message: msg,
+      });
+      appendMsg(
+        mkMsg({
+          role: "ai",
+          text: `❌ Error: ${msg}\n\n${recovery.userMessage}`,
+          recommendedPrompt: recovery.recommendedPrompt,
+          recommendedParams: recovery.recommendedParams,
+        })
+      );
     } finally {
       setIsLoading(false);
     }
@@ -632,6 +1032,37 @@ const App: React.FC = () => {
               }`}
             >
               <Body1 style={{ whiteSpace: "pre-line" }}>{msg.text}</Body1>
+
+              {msg.recommendedPrompt && (
+                <div style={{ marginTop: 8 }}>
+                  <Button
+                    size="small"
+                    appearance="secondary"
+                    onClick={() => {
+                      const mergedPrompt = msg.recommendedParams && msg.recommendedParams.length > 0
+                        ? applyRecommendationsToPrompt(
+                            lastUserPromptRef.current || prompt,
+                            msg.recommendedParams
+                          )
+                        : msg.recommendedPrompt!;
+                      setPrompt(mergedPrompt);
+                      emitTelemetryEvent({
+                        eventName: "action_done",
+                        request_id: msg.id,
+                        stage: "action_execute",
+                        source: "taskpane",
+                        outcome: "success",
+                        latency_ms: 0,
+                        action_type: "recovery_prompt_apply",
+                        action_count: 1,
+                      });
+                    }}
+                    disabled={isLoading}
+                  >
+                    Terapkan ke Prompt Terakhir
+                  </Button>
+                </div>
+              )}
 
               {/* Safety / Dry-Run Confirmation Panel */}
               {msg.isPendingAwaitingConfirmation && msg.pendingActionData && (

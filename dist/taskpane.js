@@ -13125,20 +13125,20 @@ var ExcelService = /** @class */function () {
           // Tambahkan tugas ke antrean
           _this.actionQueue.push(function () {
             return __awaiter(_this, void 0, void 0, function () {
-              var error_1;
+              var result, error_1;
               return __generator(this, function (_a) {
                 switch (_a.label) {
                   case 0:
                     _a.trys.push([0, 2,, 3]);
                     return [4 /*yield*/, this._executeActionCore(functionName, args, details)];
                   case 1:
-                    _a.sent();
-                    resolve();
-                    return [3 /*break*/, 3];
+                    result = _a.sent();
+                    resolve(result);
+                    return [2 /*return*/, result];
                   case 2:
                     error_1 = _a.sent();
                     reject(error_1);
-                    return [3 /*break*/, 3];
+                    throw error_1;
                   case 3:
                     return [2 /*return*/];
                 }
@@ -13292,17 +13292,19 @@ var ExcelService = /** @class */function () {
    */
   ExcelService.prototype._executeActionCore = function (functionName, args, details) {
     return __awaiter(this, void 0, void 0, function () {
+      var result;
       var _this = this;
       return __generator(this, function (_a) {
         switch (_a.label) {
           case 0:
             return [4 /*yield*/, Excel.run(function (context) {
               return __awaiter(_this, void 0, void 0, function () {
-                var snapshotAddress, worksheets, targetSheetNames, validFunctions, isTargetSheetFound, actionErrors, _i, targetSheetNames_1, sheetName, sheet, _a, targetCell, bulkRange, _b, _c, item, formulaCell, formatRange, startRange, dataRange, rangeToClear, chartDataRange, chartTypeMapping, targetChartSheet, newSheetName, chart, sourceRange, groupByColumn, valueColumn, aggregation, sortDescending, topN, minValue, outputSheetName, summaryRows, outputSheet, outputStart, outputRange, chartDataRange_1, chartTypeRaw, chartPreset, chartType, summaryChart, manipulationRange, sortFields, _d, _e, c, err_1;
+                var warnings, snapshotAddress, worksheets, targetSheetNames, validFunctions, isTargetSheetFound, actionErrors, _i, targetSheetNames_1, sheetName, sheet, _a, targetCell, bulkRange, _b, _c, item, formulaCell, formatRange, startRange, dataRange, rangeToClear, chartDataRange, chartTypeMapping, targetChartSheet, newSheetName, chart, sourceRange, groupByColumn, valueColumn, aggregation, sortDescending, topN, minValue, sourceHeader, safeGroup, safeValue, outputSheetName, summaryRows, outputSheet, outputStart, outputRange, chartDataRange_1, chartTypeRaw, chartPreset, chartType, summaryChart, manipulationRange, sortFields, _d, _e, c, err_1;
                 var _f, _g, _h;
                 return __generator(this, function (_j) {
                   switch (_j.label) {
                     case 0:
+                      warnings = [];
                       snapshotAddress = args.address || args.startAddress || (Array.isArray(args.items) && ((_f = args.items[0]) === null || _f === void 0 ? void 0 : _f.address) ? args.items[0].address : null);
                       if (!snapshotAddress) return [3 /*break*/, 2];
                       return [4 /*yield*/, this.captureSnapshot(context, snapshotAddress)];
@@ -13436,6 +13438,23 @@ var ExcelService = /** @class */function () {
                       sortDescending = args.sortDescending !== false;
                       topN = typeof args.topN === "number" && Number.isFinite(args.topN) ? Math.max(1, Math.min(Math.floor(args.topN), 5000)) : undefined;
                       minValue = typeof args.minValue === "number" && Number.isFinite(args.minValue) ? Math.max(args.minValue, 0) : undefined;
+                      if (typeof args.topN === "number" && Number.isFinite(args.topN) && topN !== args.topN) {
+                        warnings.push("topN dinormalisasi dari ".concat(args.topN, " menjadi ").concat(topN, "."));
+                      }
+                      if (typeof args.minValue === "number" && Number.isFinite(args.minValue) && minValue !== args.minValue) {
+                        warnings.push("minValue dinormalisasi dari ".concat(args.minValue, " menjadi ").concat(minValue, "."));
+                      }
+                      sourceHeader = Array.isArray(sourceRange.values) && sourceRange.values.length > 0 ? sourceRange.values[0] : [];
+                      if (Array.isArray(sourceHeader) && sourceHeader.length > 0) {
+                        safeGroup = Math.max(0, Math.min(groupByColumn, sourceHeader.length - 1));
+                        safeValue = Math.max(0, Math.min(valueColumn, sourceHeader.length - 1));
+                        if (safeGroup !== groupByColumn) {
+                          warnings.push("groupByColumn dinormalisasi dari ".concat(groupByColumn, " menjadi ").concat(safeGroup, "."));
+                        }
+                        if (safeValue !== valueColumn) {
+                          warnings.push("valueColumn dinormalisasi dari ".concat(valueColumn, " menjadi ").concat(safeValue, "."));
+                        }
+                      }
                       outputSheetName = typeof args.outputSheetName === "string" && args.outputSheetName.trim() ? args.outputSheetName.trim() : "PivotSummary";
                       summaryRows = this.buildPivotSummaryRows(sourceRange.values, groupByColumn, valueColumn, aggregation, sortDescending, topN, minValue);
                       outputSheet = worksheets.getItemOrNullObject(outputSheetName);
@@ -13468,6 +13487,9 @@ var ExcelService = /** @class */function () {
                         }
                         summaryChart.title.visible = true;
                         summaryChart.title.text = typeof args.chartTitle === "string" && args.chartTitle.trim() ? args.chartTitle.trim() : "Pivot Summary Chart";
+                      }
+                      if (args.createChart && summaryRows.length <= 1) {
+                        warnings.push("Chart tidak dibuat karena hasil ringkasan tidak memiliki baris data yang cukup.");
                       }
                       return [3 /*break*/, 17];
                     case 16:
@@ -13527,14 +13549,16 @@ var ExcelService = /** @class */function () {
                     case 21:
                       // Eksekusi antrean Office.js
                       _j.sent();
-                      return [2 /*return*/];
+                      return [2 /*return*/, {
+                        warnings: warnings
+                      }];
                   }
                 });
               });
             })];
           case 1:
-            _a.sent();
-            return [2 /*return*/];
+            result = _a.sent();
+            return [2 /*return*/, result];
         }
       });
     });
@@ -14173,12 +14197,12 @@ function pickModelForRequest(options) {
  */
 function sendAICommand(options) {
   return __awaiter(this, void 0, void 0, function () {
-    var userMessage, apiKey, contextData, _a, chatHistory, _b, model, errorFeedback, modelUsed, systemPrompt, proxyUrl, promptTail, finalUserMessage, messages, requestBody, lastError, _loop_1, attempt, state_1;
+    var userMessage, apiKey, contextData, _a, chatHistory, _b, model, errorFeedback, requestId, onRetryAttempt, modelUsed, systemPrompt, proxyUrl, promptTail, finalUserMessage, messages, requestBody, lastError, _loop_1, attempt, state_1;
     var _c, _d, _e;
     return __generator(this, function (_f) {
       switch (_f.label) {
         case 0:
-          userMessage = options.userMessage, apiKey = options.apiKey, contextData = options.contextData, _a = options.chatHistory, chatHistory = _a === void 0 ? [] : _a, _b = options.model, model = _b === void 0 ? "qwen/qwen3.5-397b-a17b" : _b, errorFeedback = options.errorFeedback;
+          userMessage = options.userMessage, apiKey = options.apiKey, contextData = options.contextData, _a = options.chatHistory, chatHistory = _a === void 0 ? [] : _a, _b = options.model, model = _b === void 0 ? "qwen/qwen3.5-397b-a17b" : _b, errorFeedback = options.errorFeedback, requestId = options.requestId, onRetryAttempt = options.onRetryAttempt;
           modelUsed = pickModelForRequest({
             requestedModel: model,
             contextData: contextData,
@@ -14213,7 +14237,8 @@ function sendAICommand(options) {
           requestBody = {
             apiKey: apiKey,
             model: modelUsed,
-            messages: messages
+            messages: messages,
+            requestId: requestId
           };
           lastError = null;
           _loop_1 = function _loop_1(attempt) {
@@ -14266,6 +14291,13 @@ function sendAICommand(options) {
                   err_1 = _g.sent();
                   lastError = err_1 instanceof Error ? err_1 : new Error(String(err_1));
                   console.warn("[AI] Attempt ".concat(attempt, "/").concat(MAX_RETRIES, " gagal:"), lastError.message);
+                  if (attempt < MAX_RETRIES) {
+                    onRetryAttempt === null || onRetryAttempt === void 0 ? void 0 : onRetryAttempt({
+                      attempt: attempt,
+                      maxRetries: MAX_RETRIES,
+                      reason: lastError.message
+                    });
+                  }
                   if (!(attempt < MAX_RETRIES)) return [3 /*break*/, 7];
                   // Exponential backoff: 800ms, 1600ms, 3200ms
                   return [4 /*yield*/, new Promise(function (r) {
@@ -14316,6 +14348,249 @@ var sendCommandToGemini = function sendCommandToGemini(userMessage, apiKey, cont
     errorFeedback: errorFeedback
   });
 };
+
+/***/ }),
+
+/***/ "./src/taskpane/utils/telemetry.ts":
+/*!*****************************************!*\
+  !*** ./src/taskpane/utils/telemetry.ts ***!
+  \*****************************************/
+/***/ (function(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   classifyError: function() { return /* binding */ classifyError; },
+/* harmony export */   createTelemetryRequestId: function() { return /* binding */ createTelemetryRequestId; },
+/* harmony export */   emitTelemetryEvent: function() { return /* binding */ emitTelemetryEvent; },
+/* harmony export */   startTelemetryForwarder: function() { return /* binding */ startTelemetryForwarder; }
+/* harmony export */ });
+/* provided dependency */ var Promise = __webpack_require__(/*! es6-promise */ "./node_modules/es6-promise/dist/es6-promise.js")["Promise"];
+var __assign = undefined && undefined.__assign || function () {
+  __assign = Object.assign || function (t) {
+    for (var s, i = 1, n = arguments.length; i < n; i++) {
+      s = arguments[i];
+      for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p)) t[p] = s[p];
+    }
+    return t;
+  };
+  return __assign.apply(this, arguments);
+};
+var __awaiter = undefined && undefined.__awaiter || function (thisArg, _arguments, P, generator) {
+  function adopt(value) {
+    return value instanceof P ? value : new P(function (resolve) {
+      resolve(value);
+    });
+  }
+  return new (P || (P = Promise))(function (resolve, reject) {
+    function fulfilled(value) {
+      try {
+        step(generator.next(value));
+      } catch (e) {
+        reject(e);
+      }
+    }
+    function rejected(value) {
+      try {
+        step(generator["throw"](value));
+      } catch (e) {
+        reject(e);
+      }
+    }
+    function step(result) {
+      result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+    }
+    step((generator = generator.apply(thisArg, _arguments || [])).next());
+  });
+};
+var __generator = undefined && undefined.__generator || function (thisArg, body) {
+  var _ = {
+      label: 0,
+      sent: function sent() {
+        if (t[0] & 1) throw t[1];
+        return t[1];
+      },
+      trys: [],
+      ops: []
+    },
+    f,
+    y,
+    t,
+    g = Object.create((typeof Iterator === "function" ? Iterator : Object).prototype);
+  return g.next = verb(0), g["throw"] = verb(1), g["return"] = verb(2), typeof Symbol === "function" && (g[Symbol.iterator] = function () {
+    return this;
+  }), g;
+  function verb(n) {
+    return function (v) {
+      return step([n, v]);
+    };
+  }
+  function step(op) {
+    if (f) throw new TypeError("Generator is already executing.");
+    while (g && (g = 0, op[0] && (_ = 0)), _) try {
+      if (f = 1, y && (t = op[0] & 2 ? y["return"] : op[0] ? y["throw"] || ((t = y["return"]) && t.call(y), 0) : y.next) && !(t = t.call(y, op[1])).done) return t;
+      if (y = 0, t) op = [op[0] & 2, t.value];
+      switch (op[0]) {
+        case 0:
+        case 1:
+          t = op;
+          break;
+        case 4:
+          _.label++;
+          return {
+            value: op[1],
+            done: false
+          };
+        case 5:
+          _.label++;
+          y = op[1];
+          op = [0];
+          continue;
+        case 7:
+          op = _.ops.pop();
+          _.trys.pop();
+          continue;
+        default:
+          if (!(t = _.trys, t = t.length > 0 && t[t.length - 1]) && (op[0] === 6 || op[0] === 2)) {
+            _ = 0;
+            continue;
+          }
+          if (op[0] === 3 && (!t || op[1] > t[0] && op[1] < t[3])) {
+            _.label = op[1];
+            break;
+          }
+          if (op[0] === 6 && _.label < t[1]) {
+            _.label = t[1];
+            t = op;
+            break;
+          }
+          if (t && _.label < t[2]) {
+            _.label = t[2];
+            _.ops.push(op);
+            break;
+          }
+          if (t[2]) _.ops.pop();
+          _.trys.pop();
+          continue;
+      }
+      op = body.call(thisArg, _);
+    } catch (e) {
+      op = [6, e];
+      y = 0;
+    } finally {
+      f = t = 0;
+    }
+    if (op[0] & 5) throw op[1];
+    return {
+      value: op[0] ? op[1] : void 0,
+      done: true
+    };
+  }
+};
+var TELEMETRY_WINDOW_EVENT = "excel-ai-telemetry";
+var DEFAULT_TELEMETRY_ENDPOINT = "http://localhost:3001/api/telemetry/events";
+var TELEMETRY_BATCH_SIZE = 20;
+var TELEMETRY_FLUSH_INTERVAL_MS = 2500;
+var telemetryForwarderStarted = false;
+var telemetryQueue = [];
+var telemetryFlushTimer = null;
+var telemetryFlushInFlight = false;
+function createTelemetryRequestId() {
+  return "req_".concat(Date.now(), "_").concat(Math.random().toString(36).slice(2, 8));
+}
+function classifyError(message) {
+  var lower = message.toLowerCase();
+  if (lower.includes("timeout") || lower.includes("network") || lower.includes("fetch")) return "network";
+  if (lower.includes("validation") || lower.includes("invalid") || lower.includes("payload")) return "validation";
+  if (lower.includes("model") || lower.includes("ai") || lower.includes("proxy")) return "model";
+  if (lower.includes("excel") || lower.includes("execute") || lower.includes("worksheet")) return "execution";
+  return "unknown";
+}
+function emitTelemetryEvent(partial) {
+  var event = __assign(__assign({}, partial), {
+    timestamp: new Date().toISOString(),
+    latency_ms: Number.isFinite(partial.latency_ms) ? Math.max(0, Math.round(partial.latency_ms)) : 0
+  });
+  try {
+    window.dispatchEvent(new CustomEvent(TELEMETRY_WINDOW_EVENT, {
+      detail: event
+    }));
+  } catch (_a) {
+    // Ignore dispatch failures in environments without CustomEvent support.
+  }
+  // Console output for immediate baseline collection during Sprint 1.
+  console.info("[Telemetry]", event);
+}
+function getTelemetryEndpoint() {
+  return localStorage.getItem("telemetry_endpoint") || DEFAULT_TELEMETRY_ENDPOINT;
+}
+function flushTelemetryQueue() {
+  return __awaiter(this, void 0, void 0, function () {
+    var batch, response, error_1, message;
+    return __generator(this, function (_a) {
+      switch (_a.label) {
+        case 0:
+          if (telemetryFlushInFlight || telemetryQueue.length === 0) {
+            return [2 /*return*/];
+          }
+          telemetryFlushInFlight = true;
+          batch = telemetryQueue.slice(0, TELEMETRY_BATCH_SIZE);
+          _a.label = 1;
+        case 1:
+          _a.trys.push([1, 3, 4, 5]);
+          return [4 /*yield*/, fetch(getTelemetryEndpoint(), {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              events: batch
+            })
+          })];
+        case 2:
+          response = _a.sent();
+          if (!response.ok) {
+            throw new Error("Telemetry proxy ".concat(response.status));
+          }
+          telemetryQueue = telemetryQueue.slice(batch.length);
+          return [3 /*break*/, 5];
+        case 3:
+          error_1 = _a.sent();
+          message = error_1 instanceof Error ? error_1.message : String(error_1);
+          console.warn("[Telemetry] flush gagal:", message);
+          return [3 /*break*/, 5];
+        case 4:
+          telemetryFlushInFlight = false;
+          return [7 /*endfinally*/];
+        case 5:
+          return [2 /*return*/];
+      }
+    });
+  });
+}
+function ensureFlushTimer() {
+  if (telemetryFlushTimer !== null) {
+    return;
+  }
+  telemetryFlushTimer = window.setInterval(function () {
+    void flushTelemetryQueue();
+  }, TELEMETRY_FLUSH_INTERVAL_MS);
+}
+function startTelemetryForwarder() {
+  if (telemetryForwarderStarted) {
+    return;
+  }
+  telemetryForwarderStarted = true;
+  window.addEventListener(TELEMETRY_WINDOW_EVENT, function (event) {
+    var customEvent = event;
+    var payload = customEvent.detail;
+    if (!payload) return;
+    telemetryQueue.push(payload);
+    if (telemetryQueue.length >= TELEMETRY_BATCH_SIZE) {
+      void flushTelemetryQueue();
+    }
+  });
+  ensureFlushTimer();
+}
 
 /***/ }),
 
@@ -16807,6 +17082,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _utils_gemini__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../utils/gemini */ "./src/taskpane/utils/gemini.ts");
 /* harmony import */ var _services_ExcelService__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../services/ExcelService */ "./src/taskpane/services/ExcelService.ts");
 /* harmony import */ var _constants_promptTemplates__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../constants/promptTemplates */ "./src/taskpane/constants/promptTemplates.ts");
+/* harmony import */ var _utils_telemetry__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../utils/telemetry */ "./src/taskpane/utils/telemetry.ts");
 /* provided dependency */ var Promise = __webpack_require__(/*! es6-promise */ "./node_modules/es6-promise/dist/es6-promise.js")["Promise"];
 var __assign = (undefined && undefined.__assign) || function () {
     __assign = Object.assign || function(t) {
@@ -16864,6 +17140,7 @@ var __spreadArray = (undefined && undefined.__spreadArray) || function (to, from
     }
     return to.concat(ar || Array.prototype.slice.call(from));
 };
+
 
 
 
@@ -16973,6 +17250,78 @@ function isDestructiveAction(data) {
 function formatMs(value) {
     return "".concat(Math.round(value), "ms");
 }
+function summarizeIntent(promptText) {
+    var normalized = promptText.replace(/\s+/g, " ").trim();
+    return normalized.length > 80 ? "".concat(normalized.slice(0, 77), "...") : normalized;
+}
+function getSchemaStats(contextData) {
+    var _a;
+    try {
+        var parsed = JSON.parse(contextData);
+        var sheetCount = Array.isArray(parsed.sheets) ? parsed.sheets.length : 0;
+        var sampleRangeCount = Array.isArray((_a = parsed.activeSheetInfo) === null || _a === void 0 ? void 0 : _a.selectionSample)
+            ? parsed.activeSheetInfo.selectionSample.length
+            : 0;
+        return { sheetCount: sheetCount, sampleRangeCount: sampleRangeCount };
+    }
+    catch (_b) {
+        return { sheetCount: 0, sampleRangeCount: 0 };
+    }
+}
+function buildNormalizationMessage(warnings) {
+    var normalizedLines = warnings.map(function (warning) {
+        var match = warning.match(/^(\w+) dinormalisasi dari (.+) menjadi (.+)\.$/i);
+        if (!match)
+            return "- ".concat(warning);
+        var field = match[1];
+        var fromValue = match[2];
+        var toValue = match[3];
+        return "- ".concat(field, ": ").concat(fromValue, " -> ").concat(toValue, " (gunakan ").concat(toValue, " untuk hasil konsisten)");
+    });
+    return "\u2699\uFE0F Penyesuaian otomatis diterapkan:\n".concat(normalizedLines.join("\n"));
+}
+function buildRecommendedPromptFromWarnings(warnings) {
+    var recommendedPairs = [];
+    warnings.forEach(function (warning) {
+        var match = warning.match(/^(\w+) dinormalisasi dari (.+) menjadi (.+)\.$/i);
+        if (!match)
+            return;
+        var field = match[1];
+        var toValue = match[3];
+        recommendedPairs.push("".concat(field, " ").concat(toValue));
+    });
+    if (recommendedPairs.length === 0)
+        return null;
+    return "Gunakan parameter rekomendasi berikut pada perintah berikutnya: ".concat(recommendedPairs.join(", "), ".");
+}
+function extractRecommendedParams(warnings) {
+    var params = [];
+    warnings.forEach(function (warning) {
+        var match = warning.match(/^(\w+) dinormalisasi dari (.+) menjadi (.+)\.$/i);
+        if (!match)
+            return;
+        params.push({ field: match[1], value: match[3] });
+    });
+    return params;
+}
+function applyRecommendationsToPrompt(basePrompt, params) {
+    if (!basePrompt.trim()) {
+        return params.map(function (p) { return "".concat(p.field, " ").concat(p.value); }).join(", ");
+    }
+    var updated = basePrompt;
+    for (var _i = 0, params_1 = params; _i < params_1.length; _i++) {
+        var param = params_1[_i];
+        var escapedField = param.field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        var existingPattern = new RegExp("\\b".concat(escapedField, "\\s+([^,.;\\n]+)"), "i");
+        if (existingPattern.test(updated)) {
+            updated = updated.replace(existingPattern, "".concat(param.field, " ").concat(param.value));
+        }
+        else {
+            updated = "".concat(updated.replace(/\s+$/, ""), ", ").concat(param.field, " ").concat(param.value);
+        }
+    }
+    return updated;
+}
 // ─── Component ────────────────────────────────────────────────────────────────
 var App = function () {
     var _a, _b, _c, _d;
@@ -16988,6 +17337,7 @@ var App = function () {
     var _l = (0,react__WEBPACK_IMPORTED_MODULE_0__.useState)(false), isLoading = _l[0], setIsLoading = _l[1];
     var _m = (0,react__WEBPACK_IMPORTED_MODULE_0__.useState)("Basic"), selectedTemplateLevel = _m[0], setSelectedTemplateLevel = _m[1];
     var _o = (0,react__WEBPACK_IMPORTED_MODULE_0__.useState)((_b = (_a = _constants_promptTemplates__WEBPACK_IMPORTED_MODULE_14__.PROMPT_TEMPLATES[0]) === null || _a === void 0 ? void 0 : _a.id) !== null && _b !== void 0 ? _b : ""), selectedTemplateId = _o[0], setSelectedTemplateId = _o[1];
+    var lastUserPromptRef = (0,react__WEBPACK_IMPORTED_MODULE_0__.useRef)("");
     // ── FIX #1: Ref yang selalu sinkron dengan state messages terbaru.
     // Semua callback membaca ini — bukan `messages` langsung — agar tidak stale.
     var messagesRef = (0,react__WEBPACK_IMPORTED_MODULE_0__.useRef)(messages);
@@ -17007,6 +17357,9 @@ var App = function () {
         setApiKey(saved);
         setIsKeySaved(saved.length > 0);
     }, [selectedModel]);
+    (0,react__WEBPACK_IMPORTED_MODULE_0__.useEffect)(function () {
+        (0,_utils_telemetry__WEBPACK_IMPORTED_MODULE_15__.startTelemetryForwarder)();
+    }, []);
     (0,react__WEBPACK_IMPORTED_MODULE_0__.useEffect)(function () {
         var eventType = Office.EventType.DocumentSelectionChanged;
         var handler = function () { return (0,_utils_gemini__WEBPACK_IMPORTED_MODULE_12__.invalidateWorkbookSchemaCache)(); };
@@ -17035,7 +17388,7 @@ var App = function () {
     // Satu fungsi tunggal yang menangani: eksekusi → success loop → self-correction.
     // FIX #3: finally selalu memanggil setIsLoading(false) tanpa syarat retryCount.
     var executeAction = (0,react__WEBPACK_IMPORTED_MODULE_0__.useCallback)(function (msgId, actionData, retryCount, _historySnapshot) { return __awaiter(void 0, void 0, void 0, function () {
-        var successMsg, historyAfterSuccess, ctxData, loopResp, loopErr_1, execError_1, errMsg, ctxData, fixResp, fixedAction, fixErr_1, fixMsg;
+        var actionStartedAt, executionResult, recommendedPrompt, recommendedParams, successMsg, historyAfterSuccess, ctxData, loopResp, loopErr_1, execError_1, errMsg, ctxData, fixResp, fixedAction, fixErr_1, fixMsg;
         return __generator(this, function (_a) {
             switch (_a.label) {
                 case 0:
@@ -17044,10 +17397,33 @@ var App = function () {
                     _a.label = 1;
                 case 1:
                     _a.trys.push([1, 9, 20, 21]);
+                    actionStartedAt = performance.now();
                     return [4 /*yield*/, _services_ExcelService__WEBPACK_IMPORTED_MODULE_13__.excelService.executeAction(actionData.name, actionData.args, actionData.details)];
                 case 2:
-                    _a.sent();
+                    executionResult = _a.sent();
                     (0,_utils_gemini__WEBPACK_IMPORTED_MODULE_12__.invalidateWorkbookSchemaCache)();
+                    (0,_utils_telemetry__WEBPACK_IMPORTED_MODULE_15__.emitTelemetryEvent)({
+                        eventName: "action_done",
+                        request_id: msgId,
+                        stage: "action_execute",
+                        source: "taskpane",
+                        outcome: "success",
+                        latency_ms: performance.now() - actionStartedAt,
+                        action_type: actionData.name,
+                        action_count: 1,
+                        action_latency_ms: performance.now() - actionStartedAt,
+                    });
+                    if (executionResult.warnings.length > 0) {
+                        recommendedPrompt = buildRecommendedPromptFromWarnings(executionResult.warnings);
+                        recommendedParams = extractRecommendedParams(executionResult.warnings);
+                        appendMsg(mkMsg({
+                            role: "system",
+                            text: buildNormalizationMessage(executionResult.warnings),
+                            actionOutput: "[Normalization warnings: ".concat(executionResult.warnings.length, "]"),
+                            recommendedPrompt: recommendedPrompt !== null && recommendedPrompt !== void 0 ? recommendedPrompt : undefined,
+                            recommendedParams: recommendedParams.length > 0 ? recommendedParams : undefined,
+                        }));
+                    }
                     successMsg = mkMsg({
                         role: "system",
                         text: "\u2705 ".concat(actionData.name, " berhasil.").concat(retryCount > 0 ? " (Setelah ".concat(retryCount, "x perbaikan)") : ""),
@@ -17067,6 +17443,22 @@ var App = function () {
                             contextData: ctxData,
                             chatHistory: historyAfterSuccess, // FIX #1: bukan `messages` (stale)
                             model: selectedModel,
+                            requestId: msgId,
+                            onRetryAttempt: function (_a) {
+                                var attempt = _a.attempt, maxRetries = _a.maxRetries, reason = _a.reason;
+                                (0,_utils_telemetry__WEBPACK_IMPORTED_MODULE_15__.emitTelemetryEvent)({
+                                    eventName: "retry_attempt",
+                                    request_id: msgId,
+                                    stage: "ai_call",
+                                    source: "taskpane",
+                                    outcome: "retry",
+                                    latency_ms: 0,
+                                    model_used: selectedModel,
+                                    retry_attempt_number: attempt,
+                                    max_retry_allowed: maxRetries,
+                                    retry_reason: reason,
+                                });
+                            },
                         })];
                 case 5:
                     loopResp = _a.sent();
@@ -17100,6 +17492,22 @@ var App = function () {
                             chatHistory: messagesRef.current, // FIX #1: baca ref, bukan closure
                             model: selectedModel,
                             errorFeedback: errMsg,
+                            requestId: msgId,
+                            onRetryAttempt: function (_a) {
+                                var attempt = _a.attempt, maxRetries = _a.maxRetries, reason = _a.reason;
+                                (0,_utils_telemetry__WEBPACK_IMPORTED_MODULE_15__.emitTelemetryEvent)({
+                                    eventName: "retry_attempt",
+                                    request_id: msgId,
+                                    stage: "ai_call",
+                                    source: "taskpane",
+                                    outcome: "retry",
+                                    latency_ms: 0,
+                                    model_used: selectedModel,
+                                    retry_attempt_number: attempt,
+                                    max_retry_allowed: maxRetries,
+                                    retry_reason: reason,
+                                });
+                            },
                         })];
                 case 12:
                     fixResp = _a.sent();
@@ -17124,6 +17532,18 @@ var App = function () {
                     return [3 /*break*/, 17];
                 case 17: return [3 /*break*/, 19];
                 case 18:
+                    (0,_utils_telemetry__WEBPACK_IMPORTED_MODULE_15__.emitTelemetryEvent)({
+                        eventName: "failure",
+                        request_id: msgId,
+                        stage: "action_execute",
+                        source: "taskpane",
+                        outcome: "failure",
+                        latency_ms: 0,
+                        action_type: actionData.name,
+                        error_class: (0,_utils_telemetry__WEBPACK_IMPORTED_MODULE_15__.classifyError)(errMsg),
+                        error_message: errMsg,
+                        is_recoverable: false,
+                    });
                     appendMsg(mkMsg({
                         role: "ai",
                         text: "\u274C Dibatalkan setelah ".concat(MAX_SELF_CORRECTION, "x gagal: ").concat(errMsg),
@@ -17145,10 +17565,21 @@ var App = function () {
     // Dipakai di handleSend dan di continuous loop agar tidak duplikasi kode.
     var processAIResponse = (0,react__WEBPACK_IMPORTED_MODULE_0__.useCallback)(function (response, _currentHistory) { return __awaiter(void 0, void 0, void 0, function () {
         var _a, name, args, details, actionData, previewText, autoMsg, historyWithAuto;
-        return __generator(this, function (_b) {
-            switch (_b.label) {
+        var _b, _c;
+        return __generator(this, function (_d) {
+            switch (_d.label) {
                 case 0:
                     if (!response.functionCall) {
+                        (0,_utils_telemetry__WEBPACK_IMPORTED_MODULE_15__.emitTelemetryEvent)({
+                            eventName: "action_done",
+                            request_id: (_c = (_b = _currentHistory[_currentHistory.length - 1]) === null || _b === void 0 ? void 0 : _b.id) !== null && _c !== void 0 ? _c : mkId(),
+                            stage: "action_execute",
+                            source: "taskpane",
+                            outcome: "success",
+                            latency_ms: 0,
+                            action_type: "analysis",
+                            action_count: 1,
+                        });
                         appendMsg(mkMsg({ role: "ai", text: response.textResponse }));
                         return [2 /*return*/];
                     }
@@ -17176,37 +17607,63 @@ var App = function () {
                     historyWithAuto = appendMsg(autoMsg);
                     return [4 /*yield*/, executeAction(autoMsg.id, actionData, 0, historyWithAuto)];
                 case 2:
-                    _b.sent();
-                    _b.label = 3;
+                    _d.sent();
+                    _d.label = 3;
                 case 3: return [2 /*return*/];
             }
         });
     }); }, [appendMsg, executeAction]);
     // ─── handleSend ──────────────────────────────────────────────────────────
     var handleSend = (0,react__WEBPACK_IMPORTED_MODULE_0__.useCallback)(function () { return __awaiter(void 0, void 0, void 0, function () {
-        var text, imagePayload, userMsg, historyWithUser, totalStartedAt, schemaStartedAt, ctxData, schemaDuration, aiStartedAt, response, aiDuration, totalDuration, err_1, msg;
-        var _a, _b, _c, _d, _e, _f, _g, _h;
-        return __generator(this, function (_j) {
-            switch (_j.label) {
+        var text, imagePayload, requestId, userMsg, historyWithUser, totalStartedAt, schemaStartedAt, ctxData, schemaDuration, schemaStats, aiStartedAt, response, aiDuration, totalDuration, err_1, msg;
+        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
+        return __generator(this, function (_l) {
+            switch (_l.label) {
                 case 0:
                     if (!prompt.trim() || !isKeySaved || isLoading)
                         return [2 /*return*/];
                     text = prompt.trim();
                     imagePayload = attachedImage;
+                    requestId = (0,_utils_telemetry__WEBPACK_IMPORTED_MODULE_15__.createTelemetryRequestId)();
+                    lastUserPromptRef.current = text;
                     setPrompt("");
                     setAttachedImage(null);
                     userMsg = mkMsg({ role: "user", text: text, imageBase64: imagePayload || undefined });
                     historyWithUser = appendMsg(userMsg);
+                    (0,_utils_telemetry__WEBPACK_IMPORTED_MODULE_15__.emitTelemetryEvent)({
+                        eventName: "request_start",
+                        request_id: requestId,
+                        stage: "request_start",
+                        source: "taskpane",
+                        outcome: "success",
+                        latency_ms: 0,
+                        input_type: imagePayload ? (text ? "text+image" : "image") : "text",
+                        user_intent_summary: summarizeIntent(text || "image request"),
+                        model_used: selectedModel,
+                    });
                     setIsLoading(true);
-                    _j.label = 1;
+                    _l.label = 1;
                 case 1:
-                    _j.trys.push([1, 5, 6, 7]);
+                    _l.trys.push([1, 5, 6, 7]);
                     totalStartedAt = performance.now();
                     schemaStartedAt = performance.now();
                     return [4 /*yield*/, (0,_utils_gemini__WEBPACK_IMPORTED_MODULE_12__.getWorkbookSchema)()];
                 case 2:
-                    ctxData = _j.sent();
+                    ctxData = _l.sent();
                     schemaDuration = performance.now() - schemaStartedAt;
+                    schemaStats = getSchemaStats(ctxData);
+                    (0,_utils_telemetry__WEBPACK_IMPORTED_MODULE_15__.emitTelemetryEvent)({
+                        eventName: "schema_done",
+                        request_id: requestId,
+                        stage: "schema",
+                        source: "taskpane",
+                        outcome: "success",
+                        latency_ms: schemaDuration,
+                        model_used: selectedModel,
+                        schema_latency_ms: schemaDuration,
+                        sheet_count: schemaStats.sheetCount,
+                        sample_range_count: schemaStats.sampleRangeCount,
+                    });
                     aiStartedAt = performance.now();
                     return [4 /*yield*/, (0,_utils_gemini__WEBPACK_IMPORTED_MODULE_12__.sendAICommand)({
                             userMessage: text,
@@ -17214,24 +17671,61 @@ var App = function () {
                             contextData: ctxData,
                             chatHistory: historyWithUser, // FIX #1: snapshot terbaru
                             model: selectedModel,
-                            imageBase64: imagePayload || undefined
+                            requestId: requestId,
+                            imageBase64: imagePayload || undefined,
+                            onRetryAttempt: function (_a) {
+                                var attempt = _a.attempt, maxRetries = _a.maxRetries, reason = _a.reason;
+                                (0,_utils_telemetry__WEBPACK_IMPORTED_MODULE_15__.emitTelemetryEvent)({
+                                    eventName: "retry_attempt",
+                                    request_id: requestId,
+                                    stage: "ai_call",
+                                    source: "taskpane",
+                                    outcome: "retry",
+                                    latency_ms: 0,
+                                    model_used: selectedModel,
+                                    retry_attempt_number: attempt,
+                                    max_retry_allowed: maxRetries,
+                                    retry_reason: reason,
+                                });
+                            },
                         })];
                 case 3:
-                    response = _j.sent();
+                    response = _l.sent();
                     aiDuration = performance.now() - aiStartedAt;
                     totalDuration = performance.now() - totalStartedAt;
+                    (0,_utils_telemetry__WEBPACK_IMPORTED_MODULE_15__.emitTelemetryEvent)({
+                        eventName: "ai_done",
+                        request_id: requestId,
+                        stage: "ai_call",
+                        source: "taskpane",
+                        outcome: "success",
+                        latency_ms: aiDuration,
+                        model_used: (_b = (_a = response.meta) === null || _a === void 0 ? void 0 : _a.modelUsed) !== null && _b !== void 0 ? _b : selectedModel,
+                        ai_latency_ms: aiDuration,
+                    });
                     return [4 /*yield*/, processAIResponse(response, historyWithUser)];
                 case 4:
-                    _j.sent();
+                    _l.sent();
                     appendMsg(mkMsg({
                         role: "system",
-                        text: "\u23F1 Schema ".concat(formatMs(schemaDuration), " \u2022 AI ").concat(formatMs(aiDuration), " \u2022 Total ").concat(formatMs(totalDuration), " \u2022 Model ").concat((_b = (_a = response.meta) === null || _a === void 0 ? void 0 : _a.modelUsed) !== null && _b !== void 0 ? _b : selectedModel, " \u2022 Attempt ").concat((_d = (_c = response.meta) === null || _c === void 0 ? void 0 : _c.attempts) !== null && _d !== void 0 ? _d : 1),
-                        actionOutput: "perf:schema=".concat(Math.round(schemaDuration), "ms;ai=").concat(Math.round(aiDuration), "ms;total=").concat(Math.round(totalDuration), "ms;model=").concat((_f = (_e = response.meta) === null || _e === void 0 ? void 0 : _e.modelUsed) !== null && _f !== void 0 ? _f : selectedModel, ";attempt=").concat((_h = (_g = response.meta) === null || _g === void 0 ? void 0 : _g.attempts) !== null && _h !== void 0 ? _h : 1),
+                        text: "\u23F1 Schema ".concat(formatMs(schemaDuration), " \u2022 AI ").concat(formatMs(aiDuration), " \u2022 Total ").concat(formatMs(totalDuration), " \u2022 Model ").concat((_d = (_c = response.meta) === null || _c === void 0 ? void 0 : _c.modelUsed) !== null && _d !== void 0 ? _d : selectedModel, " \u2022 Attempt ").concat((_f = (_e = response.meta) === null || _e === void 0 ? void 0 : _e.attempts) !== null && _f !== void 0 ? _f : 1),
+                        actionOutput: "perf:schema=".concat(Math.round(schemaDuration), "ms;ai=").concat(Math.round(aiDuration), "ms;total=").concat(Math.round(totalDuration), "ms;model=").concat((_h = (_g = response.meta) === null || _g === void 0 ? void 0 : _g.modelUsed) !== null && _h !== void 0 ? _h : selectedModel, ";attempt=").concat((_k = (_j = response.meta) === null || _j === void 0 ? void 0 : _j.attempts) !== null && _k !== void 0 ? _k : 1),
                     }));
                     return [3 /*break*/, 7];
                 case 5:
-                    err_1 = _j.sent();
+                    err_1 = _l.sent();
                     msg = err_1 instanceof Error ? err_1.message : String(err_1);
+                    (0,_utils_telemetry__WEBPACK_IMPORTED_MODULE_15__.emitTelemetryEvent)({
+                        eventName: "failure",
+                        request_id: requestId,
+                        stage: "ai_call",
+                        source: "taskpane",
+                        outcome: "failure",
+                        latency_ms: 0,
+                        model_used: selectedModel,
+                        error_class: (0,_utils_telemetry__WEBPACK_IMPORTED_MODULE_15__.classifyError)(msg),
+                        error_message: msg,
+                    });
                     appendMsg(mkMsg({ role: "ai", text: "\u274C Error: ".concat(msg) }));
                     return [3 /*break*/, 7];
                 case 6:
@@ -17369,6 +17863,13 @@ var App = function () {
             messages.map(function (msg) { return (react__WEBPACK_IMPORTED_MODULE_0__.createElement("div", { key: msg.id, className: "".concat(styles.messageRow, " ").concat(msg.role === "user" ? styles.userRow : styles.aiRow) },
                 react__WEBPACK_IMPORTED_MODULE_0__.createElement("div", { className: "".concat(styles.bubble, " ").concat(msg.role === "user" ? styles.userBubble : styles.aiBubble) },
                     react__WEBPACK_IMPORTED_MODULE_0__.createElement(_fluentui_react_components__WEBPACK_IMPORTED_MODULE_5__.Body1, { style: { whiteSpace: "pre-line" } }, msg.text),
+                    msg.recommendedPrompt && (react__WEBPACK_IMPORTED_MODULE_0__.createElement("div", { style: { marginTop: 8 } },
+                        react__WEBPACK_IMPORTED_MODULE_0__.createElement(_fluentui_react_components__WEBPACK_IMPORTED_MODULE_3__.Button, { size: "small", appearance: "secondary", onClick: function () {
+                                var mergedPrompt = msg.recommendedParams && msg.recommendedParams.length > 0
+                                    ? applyRecommendationsToPrompt(lastUserPromptRef.current || prompt, msg.recommendedParams)
+                                    : msg.recommendedPrompt;
+                                setPrompt(mergedPrompt);
+                            }, disabled: isLoading }, "Terapkan ke Prompt Terakhir"))),
                     msg.isPendingAwaitingConfirmation && msg.pendingActionData && (react__WEBPACK_IMPORTED_MODULE_0__.createElement(ConfirmationPanel, { actionData: msg.pendingActionData, isLoading: isLoading, onApprove: function () { return handleApproveAction(msg.id, msg.pendingActionData); }, onReject: function () { return handleRejectAction(msg.id); } }))),
                 msg.actionOutput && (react__WEBPACK_IMPORTED_MODULE_0__.createElement("span", { className: styles.systemText }, msg.actionOutput)))); }),
             isLoading && (react__WEBPACK_IMPORTED_MODULE_0__.createElement("div", { className: "".concat(styles.messageRow, " ").concat(styles.aiRow) },

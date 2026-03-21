@@ -602,6 +602,8 @@ interface SendCommandOptions {
   model?: string;
   errorFeedback?: string;
   imageBase64?: string;
+  requestId?: string;
+  onRetryAttempt?: (info: { attempt: number; maxRetries: number; reason: string }) => void;
 }
 
 interface ResponseMeta {
@@ -651,6 +653,8 @@ export async function sendAICommand(options: SendCommandOptions): Promise<AgentR
     chatHistory = [],
     model = "qwen/qwen3.5-397b-a17b",
     errorFeedback,
+    requestId,
+    onRetryAttempt,
   } = options;
 
   const modelUsed = pickModelForRequest({
@@ -685,7 +689,7 @@ export async function sendAICommand(options: SendCommandOptions): Promise<AgentR
       messages.push({ role: "user", content: finalUserMessage });
   }
 
-  const requestBody = { apiKey, model: modelUsed, messages };
+  const requestBody = { apiKey, model: modelUsed, messages, requestId };
 
   // ── Retry loop ──
   let lastError: Error | null = null;
@@ -745,6 +749,14 @@ export async function sendAICommand(options: SendCommandOptions): Promise<AgentR
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       console.warn(`[AI] Attempt ${attempt}/${MAX_RETRIES} gagal:`, lastError.message);
+
+      if (attempt < MAX_RETRIES) {
+        onRetryAttempt?.({
+          attempt,
+          maxRetries: MAX_RETRIES,
+          reason: lastError.message,
+        });
+      }
 
       if (attempt < MAX_RETRIES) {
         // Exponential backoff: 800ms, 1600ms, 3200ms
