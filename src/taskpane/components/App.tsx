@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   makeStyles,
   Input,
@@ -11,9 +11,12 @@ import {
   Text,
 } from "@fluentui/react-components";
 import { SendRegular, KeyRegular, DocumentRegular } from "@fluentui/react-icons";
-import { getWorkbookSchema, sendAICommand } from "../utils/gemini";
+import { getWorkbookSchema, sendAICommand, invalidateWorkbookSchemaCache } from "../utils/gemini";
 import { excelService } from "../services/ExcelService";
 import type { AIMasterPayload, ActionType } from "../utils/gemini";
+import { PROMPT_TEMPLATES } from "../constants/promptTemplates";
+
+type TemplateLevel = "Basic" | "Advanced" | "Automation";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -114,6 +117,24 @@ const useStyles = makeStyles({
     borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
   },
   inputField: { flexGrow: 1 },
+  quickPromptCard: {
+    margin: "8px 16px 0",
+    padding: "10px",
+    border: `1px solid ${tokens.colorNeutralStroke2}`,
+    borderRadius: "8px",
+    backgroundColor: tokens.colorNeutralBackground2,
+    display: "flex",
+    flexDirection: "column",
+    gap: "8px",
+  },
+  quickPromptActions: {
+    display: "flex",
+    gap: "8px",
+  },
+  quickPromptSelectors: {
+    display: "flex",
+    gap: "8px",
+  },
 });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -133,6 +154,10 @@ function isDestructiveAction(data: PendingActionData): boolean {
   );
 }
 
+function formatMs(value: number): string {
+  return `${Math.round(value)}ms`;
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 const App: React.FC = () => {
@@ -147,6 +172,8 @@ const App: React.FC = () => {
   const [prompt,     setPrompt]     = useState("");
   const [attachedImage, setAttachedImage] = useState<string | null>(null);
   const [isLoading,  setIsLoading]  = useState(false);
+  const [selectedTemplateLevel, setSelectedTemplateLevel] = useState<TemplateLevel>("Basic");
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(PROMPT_TEMPLATES[0]?.id ?? "");
 
   // ── FIX #1: Ref yang selalu sinkron dengan state messages terbaru.
   // Semua callback membaca ini — bukan `messages` langsung — agar tidak stale.
@@ -167,6 +194,17 @@ const App: React.FC = () => {
     setApiKey(saved);
     setIsKeySaved(saved.length > 0);
   }, [selectedModel]);
+
+  useEffect(() => {
+    const eventType = Office.EventType.DocumentSelectionChanged;
+    const handler = () => invalidateWorkbookSchemaCache();
+
+    Office.context.document.addHandlerAsync(eventType, handler);
+
+    return () => {
+      Office.context.document.removeHandlerAsync(eventType, { handler });
+    };
+  }, []);
 
   // ─── appendMsg ───────────────────────────────────────────────────────────
   // Tambah pesan ke state DAN ke ref secara sinkron.
@@ -204,6 +242,7 @@ const App: React.FC = () => {
           actionData.args,
           actionData.details
         );
+        invalidateWorkbookSchemaCache();
 
         const successMsg = mkMsg({
           role: "system",
@@ -347,7 +386,12 @@ const App: React.FC = () => {
 
     setIsLoading(true);
     try {
+      const totalStartedAt = performance.now();
+      const schemaStartedAt = performance.now();
       const ctxData = await getWorkbookSchema();
+      const schemaDuration = performance.now() - schemaStartedAt;
+
+      const aiStartedAt = performance.now();
       const response = await sendAICommand({
         userMessage: text,
         apiKey,
@@ -356,8 +400,18 @@ const App: React.FC = () => {
         model: selectedModel,
         imageBase64: imagePayload || undefined
       });
+      const aiDuration = performance.now() - aiStartedAt;
+      const totalDuration = performance.now() - totalStartedAt;
 
       await processAIResponse(response, historyWithUser);
+
+      appendMsg(
+        mkMsg({
+          role: "system",
+          text: `⏱ Schema ${formatMs(schemaDuration)} • AI ${formatMs(aiDuration)} • Total ${formatMs(totalDuration)} • Model ${response.meta?.modelUsed ?? selectedModel} • Attempt ${response.meta?.attempts ?? 1}`,
+          actionOutput: `perf:schema=${Math.round(schemaDuration)}ms;ai=${Math.round(aiDuration)}ms;total=${Math.round(totalDuration)}ms;model=${response.meta?.modelUsed ?? selectedModel};attempt=${response.meta?.attempts ?? 1}`,
+        })
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       appendMsg(mkMsg({ role: "ai", text: `❌ Error: ${msg}` }));
@@ -398,6 +452,7 @@ const App: React.FC = () => {
   const handleUndo = useCallback(async () => {
     try {
       const success = await excelService.undoLastAction();
+      if (success) invalidateWorkbookSchemaCache();
       appendMsg(
         mkMsg({
           role: "ai",
@@ -422,6 +477,51 @@ const App: React.FC = () => {
     }
     setIsKeySaved((v) => !v);
   }, [isKeySaved, apiKey, selectedModel]);
+
+  const filteredTemplates = useMemo(
+    () => PROMPT_TEMPLATES.filter((template) => template.level === selectedTemplateLevel),
+    [selectedTemplateLevel]
+  );
+
+  useEffect(() => {
+    if (filteredTemplates.length === 0) {
+      setSelectedTemplateId("");
+      return;
+    }
+
+    const stillExists = filteredTemplates.some((template) => template.id === selectedTemplateId);
+    if (!stillExists) {
+      setSelectedTemplateId(filteredTemplates[0].id);
+    }
+  }, [filteredTemplates, selectedTemplateId]);
+
+  const selectedTemplate = filteredTemplates.find((t) => t.id === selectedTemplateId) ?? filteredTemplates[0];
+
+  const handleUseTemplate = useCallback(() => {
+    if (!selectedTemplate) return;
+    setPrompt(selectedTemplate.prompt);
+  }, [selectedTemplate]);
+
+  const handleCopyTemplate = useCallback(async () => {
+    if (!selectedTemplate) return;
+    try {
+      await navigator.clipboard.writeText(selectedTemplate.prompt);
+      appendMsg(
+        mkMsg({
+          role: "system",
+          text: `Template disalin: ${selectedTemplate.title}`,
+          actionOutput: `[Template copied: ${selectedTemplate.id}]`,
+        })
+      );
+    } catch {
+      appendMsg(
+        mkMsg({
+          role: "ai",
+          text: "Gagal menyalin ke clipboard. Gunakan tombol Gunakan ke Input lalu copy manual.",
+        })
+      );
+    }
+  }, [appendMsg, selectedTemplate]);
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
@@ -479,6 +579,43 @@ const App: React.FC = () => {
           </Button>
         </div>
       </header>
+
+      <div className={styles.quickPromptCard}>
+        <Text size={300} weight="semibold">Template Prompt (Copy-Paste)</Text>
+        <div className={styles.quickPromptSelectors}>
+          <select
+            value={selectedTemplateLevel}
+            onChange={(e) => setSelectedTemplateLevel(e.target.value as TemplateLevel)}
+            style={{ width: "45%", padding: "4px", borderRadius: "4px" }}
+            disabled={isLoading}
+          >
+            <option value="Basic">Basic</option>
+            <option value="Advanced">Advanced</option>
+            <option value="Automation">Automation</option>
+          </select>
+          <select
+            value={selectedTemplateId}
+            onChange={(e) => setSelectedTemplateId(e.target.value)}
+            style={{ width: "55%", padding: "4px", borderRadius: "4px" }}
+            disabled={isLoading}
+          >
+            {filteredTemplates.map((template) => (
+              <option key={template.id} value={template.id}>
+                {template.title}
+              </option>
+            ))}
+          </select>
+        </div>
+        <Text size={200}>{selectedTemplate?.prompt ?? "Pilih template prompt."}</Text>
+        <div className={styles.quickPromptActions}>
+          <Button appearance="secondary" onClick={handleUseTemplate} disabled={isLoading || !selectedTemplate}>
+            Gunakan ke Input
+          </Button>
+          <Button appearance="primary" onClick={handleCopyTemplate} disabled={isLoading || !selectedTemplate}>
+            Copy Prompt
+          </Button>
+        </div>
+      </div>
 
       {/* ── Chat Area ── */}
       <div className={styles.chatArea}>
